@@ -13,6 +13,7 @@ upfirdn2d_op = load(
         os.path.join(module_path, "upfirdn2d.cpp"),
         os.path.join(module_path, "upfirdn2d_kernel.cu"),
     ],
+    # build_directory="/home/sysadmin/.cache/torch_extensions/upfirdn2d_debug",
 )
 
 

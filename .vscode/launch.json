@@ -1,0 +1,28 @@
+{
+	// Use IntelliSense to learn about possible attributes.
+	// Hover to view descriptions of existing attributes.
+	// For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"name": "Python: Current File",
+			"type": "python",
+			"request": "launch",
+			"program": "main.py",
+			"console": "integratedTerminal",
+			"env": {
+				"CUDA_VISIBLE_DEVICES":"0,1"
+			},
+			"justMyCode": false,
+			"args": [
+				"--config", "configs/ve/cifar10_ncsnpp_continuous.py",
+				"--mode", "eval",
+				"--workdir", "output/pretrained/score_sde_checkpoints_pytorch/ve/cifar10_ncsnpp_continuous/",
+				"--eval_folder", "eval",
+				"--config.eval.begin_ckpt","24",
+				"--config.eval.end_ckpt","24",
+				"--config.eval.enable_sampling", "True"
+			]
+		}
+	]
+}

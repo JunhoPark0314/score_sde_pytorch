@@ -16,6 +16,7 @@
 # pylint: skip-file
 """Training and evaluation for score-based generative models. """
 
+from collections import defaultdict
 import gc
 import io
 import os
@@ -40,6 +41,8 @@ import torch
 from torch.utils import tensorboard
 from torchvision.utils import make_grid, save_image
 from utils import save_checkpoint, restore_checkpoint
+from spectrum import get_spectrum
+import matplotlib.pyplot as plt
 
 FLAGS = flags.FLAGS
 
@@ -94,11 +97,15 @@ def analysis(config,
     continuous = config.training.continuous
     likelihood_weighting = config.training.likelihood_weighting
 
-    reduce_mean = config.training.reduce_mean
+    # reduce_mean = config.training.reduce_mean
+    # no_reduce = config.training.no_reduce
+    reduce_mean = False
+    no_reduce = True
     eval_step = losses.get_step_fn(sde, train=False, optimize_fn=optimize_fn,
                                    reduce_mean=reduce_mean,
                                    continuous=continuous,
-                                   likelihood_weighting=likelihood_weighting)
+                                   likelihood_weighting=likelihood_weighting,
+                                   no_reduce=no_reduce)
 
 
   # Create data loaders for likelihood evaluation. Only evaluate on uniformly dequantized data
@@ -155,23 +162,59 @@ def analysis(config,
     ema.copy_to(score_model.parameters())
     # Compute the loss function on the full evaluation dataset if loss computation is enabled
     if config.eval.enable_loss:
-      all_losses = []
+      records = defaultdict(list)
       eval_iter = iter(eval_ds)  # pytype: disable=wrong-arg-types
       for i, batch in enumerate(eval_iter):
         eval_batch = torch.from_numpy(batch['image']._numpy()).to(config.device).float()
         eval_batch = eval_batch.permute(0, 3, 1, 2)
         eval_batch = scaler(eval_batch)
-        eval_loss = eval_step(state, eval_batch)
-        all_losses.append(eval_loss.item())
+        eval_loss, logs = eval_step(state, eval_batch)
+        eval_spectrum = get_spectrum(eval_loss.flatten(0,1)).unflatten(0, (eval_loss.shape[0], eval_loss.shape[1]))
+        z_spectrum = get_spectrum(logs["z"].flatten(0,1)).unflatten(0, (logs["z"].shape[0], logs["z"].shape[1]))
+
+        records["loss"].append(eval_loss.square().mean(dim=[2,3]))
+        records["z"].append(logs["z"].square().mean(dim=[2,3]))
+        records["loss_spectrum"].append(eval_spectrum)
+        records["z_spectrum"].append(z_spectrum)
+        records["batch"].append(eval_batch)
+        for k in ['t', 'std']:
+          records[k].append(logs[k])
+        # all_losses.append(eval_loss.item())
         if (i + 1) % 1000 == 0:
           logging.info("Finished %dth step loss evaluation" % (i + 1))
+      
+      for k, v in records.items():
+        records[k] = torch.cat(v)
 
-      # Save loss values to disk or Google Cloud Storage
-      all_losses = np.asarray(all_losses)
-      with tf.io.gfile.GFile(os.path.join(analysis_dir, f"ckpt_{ckpt}_loss.npz"), "wb") as fout:
-        io_buffer = io.BytesIO()
-        np.savez_compressed(io_buffer, all_losses=all_losses, mean_loss=all_losses.mean())
-        fout.write(io_buffer.getvalue())
+      records["z"] = records["z"].mean(dim=1)
+      records["loss"] = records["loss"].mean(dim=1)
+      records["z_spectrum"] = records["z_spectrum"].mean(dim=1)
+      records["loss_spectrum"] = records["loss_spectrum"].mean(dim=1)
+      
+      plt.scatter(records["std"].cpu().log(), records["loss"].cpu().log(), s=0.05, alpha=0.9, label="loss")
+      plt.scatter(records["std"].cpu().log(), records["z"].cpu().log(), s=0.05, alpha=0.9, label="z")
+      # plt.grid(True, axis='x')
+      plt.legend()
+      plt.savefig(f"{analysis_dir}/pixel.png")
+
+      plt.clf()
+      plt.figure(figsize=(14,24))
+      for i in range(23):
+        plt.subplot(6,4,i+1)
+        plt.scatter(records["std"].cpu().log(), records["loss_spectrum"][:,i].cpu().log(), s=0.05, alpha=0.9, label="loss")
+        plt.scatter(records["std"].cpu().log(), records["z_spectrum"][:,i].cpu().log(), s=0.05, alpha=0.9, label="z")
+        # plt.grid(True, axis='x')
+        plt.title(f"{i:05d}")
+      plt.tight_layout()
+      plt.legend()
+      plt.savefig(f"{analysis_dir}/spectrum.png")
+
+      # # Save loss values to disk or Google Cloud Storage
+      # all_losses = np.asarray(all_losses)
+      # with tf.io.gfile.GFile(os.path.join(analysis_dir, f"ckpt_{ckpt}_loss.npz"), "wb") as fout:
+      #   io_buffer = io.BytesIO()
+      #   np.savez_compressed(io_buffer, all_losses=all_losses, mean_loss=all_losses.mean())
+      #   fout.write(io_buffer.getvalue())
 
     # Compute log-likelihoods (bits/dim) if enabled
     if config.eval.enable_bpd:

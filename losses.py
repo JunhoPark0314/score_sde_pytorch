@@ -52,7 +52,7 @@ def optimization_manager(config):
   return optimize_fn
 
 
-def get_sde_loss_fn(sde, train, reduce_mean=True, continuous=True, likelihood_weighting=True, eps=1e-5):
+def get_sde_loss_fn(sde, train, reduce_mean=True, continuous=True, likelihood_weighting=True, eps=1e-5, no_reduce=False):
   """Create a loss function for training with arbirary SDEs.
 
   Args:
@@ -68,7 +68,13 @@ def get_sde_loss_fn(sde, train, reduce_mean=True, continuous=True, likelihood_we
   Returns:
     A loss function.
   """
-  reduce_op = torch.mean if reduce_mean else lambda *args, **kwargs: 0.5 * torch.sum(*args, **kwargs)
+  reduce_op = None
+  if reduce_mean:
+    reduce_op = lambda x, **kwargs: torch.mean(x.reshape(x.shape[0], -1), **kwargs)
+  elif no_reduce:
+    reduce_op = lambda x, **kwargs : x
+  else:
+    reduce_op = lambda x, **kwargs: 0.5 * torch.sum(x.reshape(x.shape[0], -1), **kwargs)
 
   def loss_fn(model, batch):
     """Compute the loss function.
@@ -86,17 +92,22 @@ def get_sde_loss_fn(sde, train, reduce_mean=True, continuous=True, likelihood_we
     mean, std = sde.marginal_prob(batch, t)
     perturbed_data = mean + std[:, None, None, None] * z
     score = score_fn(perturbed_data, t)
+    logs = {"t":t,"z":z,"std":std}
 
     if not likelihood_weighting:
       losses = torch.square(score * std[:, None, None, None] + z)
-      losses = reduce_op(losses.reshape(losses.shape[0], -1), dim=-1)
+      losses = reduce_op(losses, dim=-1)
+      # losses = reduce_op(losses.reshape(losses.shape[0], -1), dim=-1)
     else:
       g2 = sde.sde(torch.zeros_like(batch), t)[1] ** 2
       losses = torch.square(score + z / std[:, None, None, None])
-      losses = reduce_op(losses.reshape(losses.shape[0], -1), dim=-1) * g2
-
-    loss = torch.mean(losses)
-    return loss
+      losses = reduce_op(losses, dim=-1) * g2
+      logs["g2"] = g2
+      # losses = reduce_op(losses.reshape(losses.shape[0], -1), dim=-1) * g2
+    
+    if not no_reduce:
+      losses = torch.mean(losses)
+    return losses, logs
 
   return loss_fn
 
@@ -148,7 +159,7 @@ def get_ddpm_loss_fn(vpsde, train, reduce_mean=True):
   return loss_fn
 
 
-def get_step_fn(sde, train, optimize_fn=None, reduce_mean=False, continuous=True, likelihood_weighting=False):
+def get_step_fn(sde, train, optimize_fn=None, reduce_mean=False, continuous=True, likelihood_weighting=False, no_reduce=False):
   """Create a one-step training/evaluation function.
 
   Args:
@@ -164,7 +175,7 @@ def get_step_fn(sde, train, optimize_fn=None, reduce_mean=False, continuous=True
   """
   if continuous:
     loss_fn = get_sde_loss_fn(sde, train, reduce_mean=reduce_mean,
-                              continuous=True, likelihood_weighting=likelihood_weighting)
+                              continuous=True, likelihood_weighting=likelihood_weighting, no_reduce=no_reduce)
   else:
     assert not likelihood_weighting, "Likelihood weighting is not supported for original SMLD/DDPM training."
     if isinstance(sde, VESDE):
@@ -192,19 +203,19 @@ def get_step_fn(sde, train, optimize_fn=None, reduce_mean=False, continuous=True
     if train:
       optimizer = state['optimizer']
       optimizer.zero_grad()
-      loss = loss_fn(model, batch)
+      loss, _ = loss_fn(model, batch)
       loss.backward()
       optimize_fn(optimizer, model.parameters(), step=state['step'])
       state['step'] += 1
       state['ema'].update(model.parameters())
+      return loss
     else:
       with torch.no_grad():
         ema = state['ema']
         ema.store(model.parameters())
         ema.copy_to(model.parameters())
-        loss = loss_fn(model, batch)
+        loss, logs = loss_fn(model, batch)
         ema.restore(model.parameters())
-
-    return loss
+      return loss, logs
 
   return step_fn

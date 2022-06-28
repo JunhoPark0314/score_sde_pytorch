@@ -336,30 +336,34 @@ def evaluate(config,
         this_sample_dir = os.path.join(
           eval_dir, f"ckpt_{ckpt}")
         tf.io.gfile.makedirs(this_sample_dir)
-        samples, n = sampling_fn(score_model)
-        samples = np.clip(samples.permute(0, 2, 3, 1).cpu().numpy() * 255., 0, 255).astype(np.uint8)
-        samples = samples.reshape(
-          (-1, config.data.image_size, config.data.image_size, config.data.num_channels))
-        # Write samples to disk or Google Cloud Storage
-        with tf.io.gfile.GFile(
-            os.path.join(this_sample_dir, f"samples_{r}.npz"), "wb") as fout:
-          io_buffer = io.BytesIO()
-          np.savez_compressed(io_buffer, samples=samples)
-          fout.write(io_buffer.getvalue())
+        this_sample_path = os.path.join(this_sample_dir, f"samples_{r}.npz")
+        if not tf.io.gfile.exists(this_sample_path):
+          samples, n = sampling_fn(score_model)
+          samples = np.clip(samples.permute(0, 2, 3, 1).cpu().numpy() * 255., 0, 255).astype(np.uint8)
+          samples = samples.reshape(
+            (-1, config.data.image_size, config.data.image_size, config.data.num_channels))
+          # Write samples to disk or Google Cloud Storage
+          with tf.io.gfile.GFile(
+              this_sample_path, "wb") as fout:
+            io_buffer = io.BytesIO()
+            np.savez_compressed(io_buffer, samples=samples)
+            fout.write(io_buffer.getvalue())
+          # Force garbage collection before calling TensorFlow code for Inception network
+          gc.collect()
 
-        # Force garbage collection before calling TensorFlow code for Inception network
-        gc.collect()
-        latents = evaluation.run_inception_distributed(samples, inception_model,
-                                                       inceptionv3=inceptionv3)
-        # Force garbage collection again before returning to JAX code
-        gc.collect()
-        # Save latent represents of the Inception network to disk or Google Cloud Storage
-        with tf.io.gfile.GFile(
-            os.path.join(this_sample_dir, f"statistics_{r}.npz"), "wb") as fout:
-          io_buffer = io.BytesIO()
-          np.savez_compressed(
-            io_buffer, pool_3=latents["pool_3"], logits=latents["logits"])
-          fout.write(io_buffer.getvalue())
+        this_stat_path = os.path.join(this_sample_dir, f"statistics_{r}.npz")
+        if not tf.io.gfile.exists(this_stat_path):
+          latents = evaluation.run_inception_distributed(samples, inception_model,
+                                                        inceptionv3=inceptionv3)
+          # Force garbage collection again before returning to JAX code
+          gc.collect()
+          # Save latent represents of the Inception network to disk or Google Cloud Storage
+          with tf.io.gfile.GFile(
+              os.path.join(this_sample_dir, f"statistics_{r}.npz"), "wb") as fout:
+            io_buffer = io.BytesIO()
+            np.savez_compressed(
+              io_buffer, pool_3=latents["pool_3"], logits=latents["logits"])
+            fout.write(io_buffer.getvalue())
 
       # Compute inception scores, FIDs and KIDs.
       # Load all statistics that have been previously computed and saved for each host
